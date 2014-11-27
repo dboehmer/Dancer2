@@ -20,6 +20,7 @@ use Dancer2::FileUtils 'path';
 use Dancer2::Core;
 use Dancer2::Core::Cookie;
 use Dancer2::Core::Error;
+use Dancer2::Core::Error2;
 use Dancer2::Core::Types;
 use Dancer2::Core::Route;
 use Dancer2::Core::Hook;
@@ -731,11 +732,9 @@ sub send_error {
     my ( $message, $status ) = @_;
 
     my $serializer = $self->engine('serializer');
-    my $err = Dancer2::Core::Error->new(
+    my $err = Dancer2::Core::Error2->new(
           message    => $message,
-          app        => $self,
-        ( status     => $status     )x!! $status,
-        ( serializer => $serializer )x!! $serializer,
+        ( status     => $status,  )x!! $status,
     )->throw;
 
     # Immediately return to dispatch if with_return coderef exists
@@ -1058,11 +1057,45 @@ sub to_app {
             $response = $self->dispatch($env)->to_psgi;
             1;
         } or do {
-            return [
-                500,
-                [ 'Content-Type' => 'text/plain' ],
-                [ "Internal Server Error\n\n$@"  ],
+            my $error = ref $@ ? $@ :
+                        Dancer2::Core::Error2->new( message => $@ );
+
+            # make sure we clean up
+            # (there would be run on a successful response)
+            # XXX: is this the with_return craziness shumphrey found?
+            $self->clear_with_return;
+            $self->cleanup;
+
+            my $show_stack = $self->config->{'show_errors'} || 0;
+
+            # we assume a serializer can serialize a hashref
+            my $serializer = $self->engine('serializer');
+            $serializer and return [
+                $error->status,
+                [ 'Content-Type' => $serializer->content_type ],
+                [
+                    $serializer->serialize({
+                        title   => $error->title,
+                        status  => $error->status,
+                        message => $show_stack
+                                 ? $error->message . $error->stack_trace
+                                 : $error->message,
+                    })
+                ],
             ];
+
+            # FIXME: we need to render a template here, actually
+            return [
+                $error->status,
+                [ 'Content-Type' => 'text/html' ],
+                [
+                    $error->title . '<br><br>' .
+                    ( $show_stack
+                        ? $error->message . $error->stack_trace->as_html
+                        : $error->message ),
+                ],
+            ];
+
         };
 
         return $response;
@@ -1248,7 +1281,10 @@ sub _dispatch_route {
         if ($error) {
             $self->log( error => "Route exception: $error" );
             $self->execute_hook( 'core.app.route_exception', $self, $error );
-            return $self->response_internal_error($error);
+
+            # rethrow
+            ref $error and $error->throw;
+            Dancer2::Core::Error2->new( message => $error )->throw;
         }
     }
 

@@ -41,6 +41,9 @@ around serialize => sub {
     my $data = try {
         $self->$orig($content, $options);
     } catch {
+        Dancer2::Core::Error2->new(
+            message => "Failed to serialize the request: $_",
+        )->throw;
         $self->log( core => "Failed to serialize the request: $_" );
     };
 
